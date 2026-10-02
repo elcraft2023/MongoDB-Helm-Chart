@@ -8,6 +8,15 @@
 {{- if not .Values.auth.enabled -}}
 {{- fail "Authentifizierung ist erforderlich; auth.enabled muss true sein" -}}
 {{- end -}}
+{{- if .Values.capacityAllocation.enabled -}}
+{{- $budget := .Values.capacityAllocation.total -}}
+{{- if or (lt (int $budget.requests.cpuMilli) $memberCount) (lt (int $budget.requests.memoryMi) $memberCount) (lt (int $budget.limits.cpuMilli) $memberCount) (lt (int $budget.limits.memoryMi) $memberCount) -}}
+{{- fail "capacityAllocation: jedes Gesamtbudget muss mindestens so groß wie replicaSet.members sein" -}}
+{{- end -}}
+{{- if or (gt (int $budget.requests.cpuMilli) (int $budget.limits.cpuMilli)) (gt (int $budget.requests.memoryMi) (int $budget.limits.memoryMi)) -}}
+{{- fail "capacityAllocation: requests dürfen die limits nicht überschreiten" -}}
+{{- end -}}
+{{- end -}}
 {{- range $i := until $memberCount -}}
 {{- if not (index $.Values.tls.memberSecrets (printf "mongodb-%d" $i)) -}}
 {{- fail (printf "tls.memberSecrets.mongodb-%d muss gesetzt sein" $i) -}}
@@ -140,7 +149,16 @@ spec:
               mountPath: /etc/mongodb-keyfile
               readOnly: true
           resources:
+            {{- if .Values.capacityAllocation.enabled }}
+            requests:
+              cpu: "{{ div (int .Values.capacityAllocation.total.requests.cpuMilli) $memberCount }}m"
+              memory: "{{ div (int .Values.capacityAllocation.total.requests.memoryMi) $memberCount }}Mi"
+            limits:
+              cpu: "{{ div (int .Values.capacityAllocation.total.limits.cpuMilli) $memberCount }}m"
+              memory: "{{ div (int .Values.capacityAllocation.total.limits.memoryMi) $memberCount }}Mi"
+            {{- else }}
             {{- toYaml .Values.resources | nindent 12 }}
+            {{- end }}
 
       volumes:
         - name: tls-files

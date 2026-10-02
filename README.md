@@ -76,7 +76,7 @@ Wichtige anpassbare Werte:
 | Interne Anmeldung | `internalAuth.existingSecret`, `internalAuth.keyFileKey` bestimmen Secret und Schlüssel für die Replica-Set-Keyfile. |
 | Datenvolumes | `storage.size`, `storage.storageClassName`, `storage.accessModes` konfigurieren die Daten-PVCs. |
 | Service | `service.port` ändert den Service-Port. |
-| Ressourcen | `resources.requests` und `resources.limits` setzen CPU- und Speicheranforderungen beziehungsweise Grenzen. |
+| Ressourcen | `capacityAllocation.total` teilt das Gesamtbudget auf die MongoDB-Pods auf; bei deaktivierter Teilung gelten `resources.requests` und `resources.limits` je Pod. |
 | Platzierung | `nodeSelector`, `tolerations`, `affinity`, `podAnnotations` und `topologySpread` beeinflussen die Pod-Platzierung und Metadaten. |
 | Backups | `backup.enabled`, `backup.schedule`, `backup.timeZone`, `backup.retentionDays` und `backup.storage` steuern Sicherungen. |
 | Wiederherstellung | `restore.enabled`, `restore.archiveFile`, `restore.database`, `restore.fullRestore` steuern einen Restore-Job. |
@@ -86,8 +86,8 @@ Beispiel für eine Vorschau mit eigenen Ressourcen, Speichergröße und Sicherun
 ```bash
 helm template mongodb ./mongodb-chart --namespace mongodb \
   --set storage.size=15Gi \
-  --set resources.requests.cpu=600m \
-  --set resources.requests.memory=768Mi \
+  --set capacityAllocation.total.requests.cpuMilli=1800 \
+  --set capacityAllocation.total.requests.memoryMi=2304 \
   --set-string backup.schedule="15 4 * * *"
 ```
 
@@ -187,9 +187,17 @@ helm upgrade --install mongodb ./mongodb-chart \
   --set restore.enabled=false
 ```
 
+## Kapazitätsaufteilung
+
+Das Chart kann ein gemeinsames CPU- und RAM-Budget gleichmäßig auf die MongoDB-Hauptcontainer aufteilen. Die Werte stehen unter `capacityAllocation.total` in `mongodb-chart/values.yaml`. Standardmäßig sind das insgesamt 750m CPU und 1536 MiB Arbeitsspeicher als Requests sowie 3000m CPU und 3072 MiB als Limits. Bei drei Mitgliedern erhält jeder MongoDB-Container daraus 250m CPU und 512 MiB Request sowie 1000m CPU und 1024 MiB Limit.
+
+Wird die Mitgliederzahl geändert, berechnet Helm die Werte je Pod neu. Nicht ganz teilbare Reste bleiben ungenutzt. Das Budget gilt für die MongoDB-Hauptcontainer; Backup-, Bootstrap- und Init-Container sind nicht darin enthalten. `capacityAllocation.enabled: false` schaltet die Teilung aus; dann gelten `resources.requests` und `resources.limits` wieder je MongoDB-Pod.
+
+Die Aufteilung ist ein fest konfiguriertes Budget. Sie misst nicht automatisch die Hardware oder freie Kapazität eines Servers. Der Kubernetes-Scheduler entscheidet anhand der Requests und der Platzierungsregeln, auf welchen Nodes die Pods laufen. Ein laufend messender Hardware-Controller ist eine separate, noch nicht implementierte Erweiterung.
+
 ## Ressourcen und mehrere Server
 
-Die Ressourcenverteilung erfolgt durch den Kubernetes-Scheduler anhand von `resources.requests`, `resources.limits` und den Platzierungsregeln. Das Chart enthält keinen eigenen Hardware-Manager, der Serverressourcen dynamisch zwischen Pods aufteilt.
+Helm teilt das konfigurierte Gesamtbudget in gleiche Werte je MongoDB-Pod. Der Kubernetes-Scheduler platziert die Pods anschließend anhand ihrer Requests und der Platzierungsregeln. Ein Controller, der freie Hardware laufend misst und das Budget automatisch ändert, ist nicht enthalten.
 
 Die Topology-Spread-Regel versucht, MongoDB-Pods über Kubernetes-Nodes zu verteilen. Mit einem Node, wie beim normalen Minikube-Profil, laufen alle drei Pods auf demselben Node. Ein Minikube-Mehrknotenprofil kann Verteilung und Failover testen, stellt aber keine drei unabhängigen physischen Server dar.
 

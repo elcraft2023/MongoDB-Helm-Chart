@@ -23,6 +23,21 @@ storage:
   accessModes:
     - ReadWriteOnce
 
+# Gesamtbudget für alle MongoDB-Hauptcontainer zusammen.
+# Das Chart teilt diesen Wert gleichmäßig durch replicaSet.members.
+# Nicht teilbare Reste bleiben ungenutzt; Jobs und Init-Container sind nicht enthalten.
+capacityAllocation:
+  enabled: true
+  total:
+    requests:
+      cpuMilli: 750
+      memoryMi: 1536
+    limits:
+      cpuMilli: 3000
+      memoryMi: 3072
+
+# Wird nur verwendet, wenn capacityAllocation.enabled=false ist.
+# In diesem Fall gelten diese Ressourcenwerte je MongoDB-Pod.
 resources:
   requests:
     cpu: 250m
