@@ -1,0 +1,173 @@
+{{- $memberCount := int .Values.replicaSet.members -}}
+{{- if lt $memberCount 1 -}}
+{{- fail "replicaSet.members muss mindestens 1 sein" -}}
+{{- end -}}
+{{- if not .Values.tls.enabled -}}
+{{- fail "TLS ist erforderlich; tls.enabled muss true sein" -}}
+{{- end -}}
+{{- if not .Values.auth.enabled -}}
+{{- fail "Authentifizierung ist erforderlich; auth.enabled muss true sein" -}}
+{{- end -}}
+{{- range $i := until $memberCount -}}
+{{- if not (index $.Values.tls.memberSecrets (printf "mongodb-%d" $i)) -}}
+{{- fail (printf "tls.memberSecrets.mongodb-%d muss gesetzt sein" $i) -}}
+{{- end -}}
+{{- end }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "mongodb-chart.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "mongodb-chart.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "mongodb-chart.fullname" . }}-headless
+  replicas: {{ .Values.replicaSet.members }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "mongodb-chart.fullname" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "mongodb-chart.fullname" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.topologySpread.maxSkew }}
+          topologyKey: {{ .Values.topologySpread.topologyKey | quote }}
+          whenUnsatisfiable: {{ .Values.topologySpread.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "mongodb-chart.fullname" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- end }}
+      initContainers:
+        - name: select-certificate
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              POD_ORDINAL="${HOSTNAME##*-}"
+              CERT_DIR="/secrets/mongo-${POD_ORDINAL}"
+              if [ ! -f "$CERT_DIR/tls.crt" ]; then
+                echo "Kein Zertifikat für Pod $HOSTNAME gefunden"
+                exit 1
+              fi
+              cat "$CERT_DIR/tls.crt" "$CERT_DIR/tls.key" > /tls/server.pem
+              cp "$CERT_DIR/ca.crt" /tls/ca.crt
+              chown 999:999 /tls/server.pem
+              chmod 600 /tls/server.pem
+          volumeMounts:
+            - name: tls-files
+              mountPath: /tls
+            {{- range $i := until $memberCount }}
+            - name: mongo-secret-{{ $i }}
+              mountPath: /secrets/mongo-{{ $i }}
+              readOnly: true
+            {{- end }}
+
+        - name: prepare-keyfile
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              cp /key-source/keyfile /key-ready/keyfile
+              chown 999:999 /key-ready/keyfile
+              chmod 400 /key-ready/keyfile
+          volumeMounts:
+            - name: keyfile-source
+              mountPath: /key-source
+              readOnly: true
+            - name: keyfile-ready
+              mountPath: /key-ready
+
+      containers:
+        - name: mongodb
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.usernameKey }}
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.passwordKey }}
+          args:
+            - --bind_ip_all
+            - --port=27017
+            - --replSet={{ .Values.replicaSet.name }}
+            - --dbpath=/data/db
+            - --keyFile=/etc/mongodb-keyfile/keyfile
+            - --tlsMode=requireTLS
+            - --tlsCertificateKeyFile=/tls/server.pem
+            - --tlsCAFile=/tls/ca.crt
+            - --tlsAllowConnectionsWithoutCertificates
+          ports:
+            - name: mongodb
+              containerPort: 27017
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /data/db
+            - name: tls-files
+              mountPath: /tls
+              readOnly: true
+            - name: keyfile-ready
+              mountPath: /etc/mongodb-keyfile
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+
+      volumes:
+        - name: tls-files
+          emptyDir: {}
+        - name: keyfile-source
+          secret:
+            secretName: {{ .Values.internalAuth.existingSecret }}
+            items:
+              - key: {{ .Values.internalAuth.keyFileKey }}
+                path: keyfile
+        - name: keyfile-ready
+          emptyDir: {}
+        {{- range $i := until $memberCount }}
+        - name: mongo-secret-{{ $i }}
+          secret:
+            secretName: {{ index $.Values.tls.memberSecrets (printf "mongodb-%d" $i) }}
+        {{- end }}
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        {{ with .Values.storage.storageClassName }}
+        storageClassName: {{ . | quote }}
+        {{ end }}
+        accessModes:
+          {{- toYaml .Values.storage.accessModes | nindent 10 }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size }}

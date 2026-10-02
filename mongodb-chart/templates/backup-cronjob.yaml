@@ -1,0 +1,67 @@
+{{- if .Values.backup.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "mongodb-chart.fullname" . }}-backup
+  namespace: {{ .Release.Namespace }}
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  timeZone: {{ .Values.backup.timeZone | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      ttlSecondsAfterFinished: 86400
+      template:
+        spec:
+          restartPolicy: OnFailure
+          automountServiceAccountToken: false
+          containers:
+            - name: backup
+              image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              env:
+                - name: MONGO_USERNAME
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.auth.existingSecret }}
+                      key: {{ .Values.auth.usernameKey }}
+                - name: MONGO_PASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.auth.existingSecret }}
+                      key: {{ .Values.auth.passwordKey }}
+                - name: RETENTION_DAYS
+                  value: {{ .Values.backup.retentionDays | quote }}
+              command:
+                - /bin/sh
+                - -ec
+                - |
+                  timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
+                  backup_file="/backups/mongodb-${timestamp}.archive.gz"
+                  find /backups -maxdepth 1 -type f -name 'mongodb-*.archive.gz' -mmin "+$((RETENTION_DAYS * 1440))" -delete
+                  mongodb_uri="mongodb://{{ include "mongodb-chart.memberHosts" . }}/?replicaSet={{ .Values.replicaSet.name }}&tls=true&tlsCAFile=/tls/ca.crt"
+                  mongodump --uri="$mongodb_uri" --username="$MONGO_USERNAME" --password="$MONGO_PASSWORD" --authenticationDatabase=admin --oplog --archive="$backup_file" --gzip
+                  test -s "$backup_file"
+                  echo "Backup erstellt: $backup_file"
+              volumeMounts:
+                - name: backup-data
+                  mountPath: /backups
+                - name: tls-ca
+                  mountPath: /tls
+                  readOnly: true
+              resources:
+                {{- toYaml .Values.resources | nindent 16 }}
+          volumes:
+            - name: backup-data
+              persistentVolumeClaim:
+                claimName: {{ include "mongodb-chart.fullname" . }}-backups
+            - name: tls-ca
+              secret:
+                secretName: {{ index .Values.tls.memberSecrets "mongodb-0" }}
+                items:
+                  - key: ca.crt
+                    path: ca.crt
+{{- end }}

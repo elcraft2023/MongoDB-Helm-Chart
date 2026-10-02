@@ -1,0 +1,69 @@
+nameOverride: ""
+fullnameOverride: ""
+
+replicaSet:
+  name: rs0
+  members: 3
+
+image:
+  repository: mongo
+  tag: "8.0"
+  pullPolicy: IfNotPresent
+
+tls:
+  enabled: true
+  memberSecrets:
+    mongodb-0: mongo-0-tls
+    mongodb-1: mongo-1-tls
+    mongodb-2: mongo-2-tls
+
+storage:
+  size: 10Gi
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+auth:
+  enabled: true
+  existingSecret: mongodb-auth
+  usernameKey: username
+  passwordKey: password
+
+internalAuth:
+  existingSecret: mongodb-internal-auth
+  keyFileKey: keyfile
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+service:
+  port: 27017
+backup:
+  enabled: true
+  schedule: "0 3 * * *"
+  timeZone: "Europe/Zurich"
+  retentionDays: 30
+  storage:
+    size: 20Gi
+    storageClassName: ""
+    accessModes:
+      - ReadWriteOnce
+restore:
+  enabled: false
+  archiveFile: ""
+  database: ""
+  fullRestore: false

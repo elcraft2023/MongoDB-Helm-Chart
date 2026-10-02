@@ -1,0 +1,80 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "mongodb-chart.fullname" . }}-bootstrap
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      containers:
+        - name: initialize-replica-set
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: MONGO_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.usernameKey }}
+            - name: MONGO_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.passwordKey }}
+          command:
+            - sh
+            - -c
+            - |
+              HOST="{{ include "mongodb-chart.fullname" . }}-0.{{ include "mongodb-chart.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
+              URI="mongodb://$HOST:27017/admin?directConnection=true"
+
+              until mongosh "$URI" \
+                --tls \
+                --tlsCAFile /tls/ca.crt \
+                --username "$MONGO_USERNAME" \
+                --password "$MONGO_PASSWORD" \
+                --authenticationDatabase admin \
+                --quiet \
+                --eval 'db.adminCommand("ping")'
+              do
+                echo "Warte auf MongoDB..."
+                sleep 5
+              done
+
+              mongosh "$URI" \
+                --tls \
+                --tlsCAFile /tls/ca.crt \
+                --username "$MONGO_USERNAME" \
+                --password "$MONGO_PASSWORD" \
+                --authenticationDatabase admin \
+                --quiet \
+                --eval '
+                  try {
+                    rs.status();
+                    print("Replica Set ist bereits initialisiert.");
+                  } catch (error) {
+                    rs.initiate({
+                      _id: {{ .Values.replicaSet.name | quote }},
+                members: [
+                  {{- $memberCount := int $.Values.replicaSet.members }}
+                  {{- range $i := until $memberCount }}
+                  { _id: {{ $i }}, host: "{{ include "mongodb-chart.fullname" $ }}-{{ $i }}.{{ include "mongodb-chart.fullname" $ }}-headless.{{ $.Release.Namespace }}.svc.cluster.local:27017" }{{ if lt (add1 $i) $memberCount }},{{ end }}
+                  {{- end }}
+                ]
+                    });
+                  }
+                '
+          volumeMounts:
+            - name: tls-secret
+              mountPath: /tls
+              readOnly: true
+      volumes:
+        - name: tls-secret
+          secret:
+            secretName: {{ index .Values.tls.memberSecrets "mongodb-0" }}
