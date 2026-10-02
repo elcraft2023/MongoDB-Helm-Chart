@@ -1,61 +1,206 @@
-# MongoDB Replica Set Helm Chart
+# MongoDB Helm Chart
 
-Ein Helm Chart für ein MongoDB Replica Set mit drei Mitgliedern in Kubernetes.
+Ein anpassbares Helm Chart für ein MongoDB Replica Set auf Kubernetes. Es richtet standardmäßig drei MongoDB-Mitglieder mit TLS, interner Replica-Set-Authentifizierung, dauerhaftem Speicher und optionalen Backups ein.
 
-## Architektur
+> **Hinweis zu Geheimnissen:** Keine echten Passwörter, privaten Schlüssel, Zertifikate oder Kubernetes-Secret-Inhalte in dieses Repository oder in `values.yaml` eintragen. `certs/` ist durch `.gitignore` ausgeschlossen. Die lokalen Dateien dort können außerdem veraltet sein; maßgeblich ist die Secret-Konfiguration im Cluster beziehungsweise in Vault.
 
-- Ein StatefulSet verwaltet die drei Pods `mongodb-0`, `mongodb-1` und `mongodb-2`.
-- Der Headless-Service `mongodb-headless` stellt stabile DNS-Namen für die Pods bereit.
-- Jeder Pod erhält ein eigenes PersistentVolumeClaim für seine Daten.
-- Jeder Pod verwendet ein eigenes TLS-Zertifikat aus einem Kubernetes-Secret.
-- Die Zertifikate werden von einer gemeinsamen CA signiert.
-- Die interne Replica-Set-Authentifizierung verwendet einen gemeinsamen Keyfile aus einem Kubernetes-Secret.
-- Die Admin-Zugangsdaten werden aus dem vorhandenen Kubernetes-Secret `mongodb-auth` gelesen.
-- Ein Helm-Bootstrap-Job initialisiert das Replica Set.
+## Inhalt
 
-## Unterstützte Anpassungen
+- [Architektur und Funktionen](#architektur-und-funktionen)
+- [Voraussetzungen und Start](#voraussetzungen-und-start)
+- [Anpassungen](#anpassungen)
+- [Secrets und Passwörter](#secrets-und-passwörter)
+- [Backups und Wiederherstellung](#backups-und-wiederherstellung)
+- [Ressourcen und mehrere Server](#ressourcen-und-mehrere-server)
+- [HashiCorp Vault](#hashicorp-vault)
+- [Prüfungen und bekannte Grenzen](#prüfungen-und-bekannte-grenzen)
 
-Die Werte in `mongodb-chart/values.yaml` erlauben unter anderem Anpassungen für:
+## Architektur und Funktionen
 
-- Replica-Set-Name und Mitgliederzahl bei der Erstinstallation
-- MongoDB-Image, Version und Pull-Richtlinie
-- CPU- und Speicheranforderungen sowie Limits
-- Größe, Zugriffsmuster und StorageClass der Daten- und Backup-Volumes
-- Kubernetes-Service-Port
-- Pod-Annotations, Node-Selector, Affinity und Tolerations
-- Topologieverteilung über Nodes
-- Namen und Schlüssel der TLS-, Admin- und internen Auth-Secrets
-- Backup-Zeitplan, Zeitzone und Aufbewahrungsdauer
-- gezielten oder vollständigen Restore
+Das Chart enthält:
 
-Für jedes Mitglied muss ein TLS-Secret unter `tls.memberSecrets.mongodb-<ordinal>` eingetragen sein. Das Zertifikat muss den DNS-Namen des jeweiligen Pods im gewählten Release und Namespace enthalten. Eine Änderung von `replicaSet.members` nach der Erstinstallation konfiguriert ein bestehendes Replica Set nicht automatisch um; dafür ist eine kontrollierte MongoDB-Rekonfiguration erforderlich.
+- Einen `StatefulSet` für standardmäßig drei MongoDB-Pods (`mongodb-0` bis `mongodb-2`).
+- Ein Headless Service für stabile DNS-Namen der Pods.
+- Ein eigenes dauerhaftes Volume pro MongoDB-Pod.
+- Individuelle TLS-Zertifikate pro Mitglied und eine gemeinsame CA.
+- Eine Keyfile-basierte interne Authentifizierung zwischen Replica-Set-Mitgliedern.
+- Einen Bootstrap-Job, der das Replica Set initialisiert.
+- Einen optionalen Backup-CronJob mit eigenem persistentem Backup-Volume.
+- Einen optionalen Restore-Job, der ein ausgewähltes Archiv wiederherstellt.
+- Konfigurierbare Ressourcen und Regeln zur Pod-Platzierung.
 
-## Sicherheit
+## Voraussetzungen und Start
 
-TLS-Zertifikate, private Schlüssel, Keyfiles und Passwortdateien werden außerhalb des Charts bereitgestellt. Sie gehören nicht ins Git-Repository. Das Chart verweist auf Kubernetes-Secrets, deren Inhalte nicht in `values.yaml` eingetragen werden.
+Benötigt werden ein Kubernetes-Cluster sowie `kubectl` und Helm. Für den lokalen Versuch wurde Minikube verwendet.
 
-Die Zertifikate müssen DNS-Namen für alle drei Pods im verwendeten Release und Namespace enthalten.
+Die benötigten TLS-, Authentifizierungs- und Keyfile-Secrets müssen vor dem Installieren im Ziel-Namespace vorhanden sein. Alternativ kann Vault Secrets Operator sie aus Vault bereitstellen; warte dann, bis die zugehörigen `VaultStaticSecret`-Ressourcen als synchronisiert und bereit angezeigt werden.
+
+```bash
+minikube start
+kubectl create namespace mongodb
+helm lint ./mongodb-chart
+helm upgrade --install mongodb ./mongodb-chart \
+  --namespace mongodb \
+  --wait \
+  --timeout 10m
+```
+
+Status prüfen:
+
+```bash
+kubectl get pods,services,pvc,cronjob -n mongodb
+kubectl rollout status statefulset/mongodb -n mongodb --timeout=5m
+```
+
+Für ein bereits laufendes Minikube-Profil genügt `minikube start`. Bei einem anderen Release-Namen, Namespace oder DNS-Namen müssen die Zertifikate passende Subject Alternative Names enthalten.
+
+## Anpassungen
+
+Die Standardwerte und ihre Kommentare stehen in [`mongodb-chart/values.yaml`](mongodb-chart/values.yaml). Änderungen lassen sich in einer eigenen Werte-Datei bündeln, zum Beispiel `my-values.yaml`, und mit `-f my-values.yaml` übergeben. Geheimnisse gehören nicht in diese Datei.
+
+Vor einer Installation kann Helm die resultierenden Kubernetes-Ressourcen anzeigen:
+
+```bash
+helm template mongodb ./mongodb-chart --namespace mongodb -f my-values.yaml
+```
+
+Wichtige anpassbare Werte:
+
+| Bereich | Werte und Zweck |
+|---|---|
+| Namen | `nameOverride`, `fullnameOverride` ändern die Chart- und Ressourcennamen. |
+| Replica Set | `replicaSet.name` setzt den Replica-Set-Namen; `replicaSet.members` legt die Mitgliederzahl fest. |
+| MongoDB-Image | `image.repository`, `image.tag`, `image.pullPolicy` wählen Image und Abrufverhalten. |
+| TLS | `tls.enabled` muss aktiviert bleiben; `tls.memberSecrets` ordnet jedem Pod sein TLS-Secret zu. |
+| Anmeldung | `auth.existingSecret`, `auth.usernameKey`, `auth.passwordKey` wählen Kubernetes-Secret und Daten-Schlüssel. |
+| Interne Anmeldung | `internalAuth.existingSecret`, `internalAuth.keyFileKey` bestimmen Secret und Schlüssel für die Replica-Set-Keyfile. |
+| Datenvolumes | `storage.size`, `storage.storageClassName`, `storage.accessModes` konfigurieren die Daten-PVCs. |
+| Service | `service.port` ändert den Service-Port. |
+| Ressourcen | `resources.requests` und `resources.limits` setzen CPU- und Speicheranforderungen beziehungsweise Grenzen. |
+| Platzierung | `nodeSelector`, `tolerations`, `affinity`, `podAnnotations` und `topologySpread` beeinflussen die Pod-Platzierung und Metadaten. |
+| Backups | `backup.enabled`, `backup.schedule`, `backup.timeZone`, `backup.retentionDays` und `backup.storage` steuern Sicherungen. |
+| Wiederherstellung | `restore.enabled`, `restore.archiveFile`, `restore.database`, `restore.fullRestore` steuern einen Restore-Job. |
+
+Beispiel für eine Vorschau mit eigenen Ressourcen, Speichergröße und Sicherungszeit:
+
+```bash
+helm template mongodb ./mongodb-chart --namespace mongodb \
+  --set storage.size=15Gi \
+  --set resources.requests.cpu=600m \
+  --set resources.requests.memory=768Mi \
+  --set-string backup.schedule="15 4 * * *"
+```
+
+Ein bereits initialisiertes Replica Set lässt sich nicht gefahrlos durch bloßes Ändern von `replicaSet.members` skalieren. Für zusätzliche Mitglieder braucht es passende Zertifikate und eine kontrollierte Replica-Set-Konfigurationsänderung. Außerdem sind Änderungen am unveränderlichen `StatefulSet`-Selector nicht per normalem Helm-Upgrade möglich.
+
+## Secrets und Passwörter
+
+Standardmäßig erwartet das Chart folgende Kubernetes-Secrets im selben Namespace wie MongoDB:
+
+| Kubernetes-Secret | Schlüssel | Inhalt |
+|---|---|---|
+| `mongodb-auth` | `username`, `password` | MongoDB-Administrator-Anmeldung |
+| `mongodb-internal-auth` | `keyfile` | Gemeinsamer Schlüssel für die interne Replica-Set-Anmeldung |
+| `mongo-0-tls`, `mongo-1-tls`, `mongo-2-tls` | `tls.crt`, `tls.key`, `ca.crt` | Zertifikat, privater Schlüssel und CA je Mitglied |
+
+Die Namen und Schlüssel lassen sich über `auth`, `internalAuth` und `tls.memberSecrets` ändern. Die Secret-Werte stehen nicht in `values.yaml`. Das Chart liest sie zur Laufzeit aus Kubernetes-Secrets. Kubernetes-Secrets sind dennoch kein Passwortmanager: Zugriffsrechte auf Secrets oder auf die laufenden Pods können den Zugriff auf die Werte ermöglichen. Der Zugriff sollte daher über RBAC eingeschränkt werden.
+
+### Woher kommen die Werte in dieser Installation?
+
+Wenn Vault Secrets Operator eingerichtet ist, liegen die maßgeblichen Werte in Vault KV v2 und werden als Kubernetes-Secrets synchronisiert:
+
+| Vault-Pfad | Ziel im Kubernetes-Cluster |
+|---|---|
+| `secret/mongodb/auth` | `mongodb-auth` mit `username` und `password` |
+| `secret/mongodb/internal-auth` | `mongodb-internal-auth` mit `keyfile` |
+| `secret/mongodb/tls/mongo-0` | `mongo-0-tls` |
+| `secret/mongodb/tls/mongo-1` | `mongo-1-tls` |
+| `secret/mongodb/tls/mongo-2` | `mongo-2-tls` |
+
+Die TLS-Werte im Vault-Pfad verwenden die Schlüssel `tls.crt`, `tls.key` und `ca.crt`. Die zugehörigen `VaultStaticSecret`-Ressourcen sind in `vault/vso-mongodb.yaml` beschrieben. Der Status kann ohne Ausgabe der geheimen Inhalte kontrolliert werden:
+
+```bash
+kubectl --context=minikube get vaultstaticsecrets -n mongodb
+```
+
+### Administratorpasswort ändern
+
+Eine Passwortänderung hat zwei Schritte: MongoDB muss das neue Passwort für den Benutzer speichern, und anschließend muss der Vault-Wert aktualisiert werden. Nur das Kubernetes-Secret oder Vault zu ändern aktualisiert das in MongoDB gespeicherte Passwort nicht.
+
+1. Erzeuge ein neues ASCII-Passwort lokal und halte es aus Git heraus. Beispiel: `openssl rand -hex 32 > certs/admin-password.txt`.
+2. Verbinde dich mit dem derzeit gültigen Passwort über `mongosh` zur Primary und ändere das MongoDB-Passwort interaktiv mit `db.getSiblingDB("admin").changeUserPassword("admin", passwordPrompt())`. `passwordPrompt()` wartet auf die Eingabe und schreibt das Passwort nicht in den Befehl.
+3. Aktualisiere danach den Vault-Eintrag `secret/mongodb/auth`, Feld `password`, mit demselben neuen Wert. Verwende für den Vault-Zugriff die lokale Entwicklungsanleitung in `vault/README.md`; dort steht auch, wie die Eingabe ohne Anzeige in der Shell erfolgt.
+4. Warte, bis `mongodb-auth-from-vault` wieder synchronisiert und bereit ist. Prüfe anschließend die Anmeldung mit `mongosh --password`, damit die Eingabeaufforderung das Passwort verdeckt.
+5. Lösche die temporäre Passwortdatei nach erfolgreicher Prüfung und entferne das Passwort aus der Zwischenablage.
+
+Das lokale Demo-Vault ist im Entwicklungsmodus mit In-Memory-Speicher eingerichtet. Ein Neustart kann die dort gespeicherten Werte löschen. Es ist nicht für produktive Geheimnisverwaltung geeignet. Für produktive Nutzung muss Vault mit dauerhaftem Speicher, geeigneter Authentifizierung, TLS und gesicherter Entsiegelung konfiguriert werden.
 
 ## Backups und Wiederherstellung
 
-Der Chart erstellt standardmäßig täglich um 03:00 Uhr (`Europe/Zurich`) ein Backup. Archive liegen auf einem separaten persistenten Volume (standardmäßig 20 GiB). Die Aufbewahrung beträgt standardmäßig 30 Tage.
+Backups sind standardmäßig aktiviert. Der CronJob erstellt täglich um 03:00 Uhr in der Zeitzone `Europe/Zurich` ein komprimiertes MongoDB-Archiv. Die Dateien liegen auf einem separaten Backup-PVC, standardmäßig mit 20 GiB. Backups werden nach 30 Tagen gelöscht. Zeitplan, Zeitzone, Aufbewahrungsdauer und PVC sind über `backup.*` anpassbar.
 
-Der zeitgesteuerte CronJob wurde durch vorübergehendes Ausführen jede Minute geprüft. Die 30-Tage-Löschregel wurde mit einer 31 Tage alten Testdatei geprüft.
+Ein manuelles Backup lässt sich aus dem CronJob erstellen:
 
-Restores sind standardmäßig deaktiviert. Für einen Datenbank-Restore müssen Archivdatei und Datenbankname gesetzt sein. Ein vollständiger Restore erfordert `restore.fullRestore=true`. Ein vollständiger Dump mit Oplog wurde in einer separaten, temporären MongoDB-Testinstanz wiederhergestellt und der Testdatensatz anschließend geprüft. Ein Chart-Restore-Job wurde nicht auf dem produktiven Replica Set ausgeführt.
+```bash
+kubectl create job mongodb-backup-manual \
+  --from=cronjob/mongodb-backup \
+  -n mongodb
+kubectl logs job/mongodb-backup-manual -n mongodb
+```
 
-Das Backup-Volume bleibt innerhalb des Kubernetes-Clusters. Für Schutz vor Verlust des Clusters oder Speichers müssen wichtige Archive zusätzlich außerhalb des Clusters gesichert werden.
+Der Job muss erfolgreich mit `Complete` enden. `0/1 Completed` bei seinem Pod ist normal: Der Einmal-Container ist beendet; entscheidend ist der Jobstatus `Complete` und der erfolgreiche Logeintrag „Backup erstellt“.
 
-## Resource allocation and pod placement
+Die Archive liegen auf dem PVC `mongodb-backups` unter `/backups`. Zum Anzeigen der Dateien kann ein temporärer Pod das PVC mounten. Danach den temporären Pod wieder löschen. Ein Backup auf demselben Cluster schützt nicht vor Verlust des Clusters oder seines Speichers; wichtige Archive zusätzlich außerhalb des Clusters sichern.
 
-CPU- und Speicheranforderungen sowie Limits sind unter `resources` konfigurierbar. Kubernetes verwendet die Anforderungen beim Planen der Pods und setzt die Limits während des Betriebs durch.
+### Datenbank wiederherstellen
 
-Die Topologie-Regel verteilt MongoDB-Mitglieder bevorzugt über Nodes. Sie wurde in einem Drei-Node-Minikupe-Testcluster geprüft: alle drei Pods lagen auf unterschiedlichen Nodes. Ein Mitgliedsausfall und der Ausfall eines Worker-Nodes führten jeweils zur Wahl eines neuen Primary; nach Neustart trat das Mitglied wieder als Secondary bei. Die Minikube-Nodes sind Docker-Container auf demselben Rechner und belegen keine Ausfallsicherheit über mehrere physische Server.
+Ein datenbankspezifischer Restore benötigt den Archivdateinamen und einen Datenbanknamen:
+
+```bash
+helm upgrade --install mongodb ./mongodb-chart \
+  --namespace mongodb --no-hooks \
+  --set restore.enabled=true \
+  --set restore.fullRestore=false \
+  --set-string restore.database=backup_test \
+  --set-string restore.archiveFile=mongodb-YYYYMMDDTHHMMSSZ.archive.gz
+```
+
+### Vollständige Wiederherstellung
+
+Für eine vollständige Wiederherstellung wird `restore.fullRestore=true` gesetzt und kein Datenbankname angegeben:
+
+```bash
+helm upgrade --install mongodb ./mongodb-chart \
+  --namespace mongodb --no-hooks \
+  --set restore.enabled=true \
+  --set restore.fullRestore=true \
+  --set-string restore.archiveFile=mongodb-YYYYMMDDTHHMMSSZ.archive.gz
+```
+
+Der Restore verwendet `--drop` und kann vorhandene Daten überschreiben. Die Eingaben werden durch das Template geprüft: Der Archivwert muss ein Dateiname ohne Pfad sein; Datenbank-Restore und vollständiger Restore dürfen nicht gleichzeitig gewählt werden. Ein Restore-Job sollte nur nach Prüfung des Archivs und mit klarer Kenntnis des Ziels gestartet werden.
+
+Restore anschließend wieder deaktivieren:
+
+```bash
+helm upgrade --install mongodb ./mongodb-chart \
+  --namespace mongodb --no-hooks \
+  --set restore.enabled=false
+```
+
+## Ressourcen und mehrere Server
+
+Die Ressourcenverteilung erfolgt durch den Kubernetes-Scheduler anhand von `resources.requests`, `resources.limits` und den Platzierungsregeln. Das Chart enthält keinen eigenen Hardware-Manager, der Serverressourcen dynamisch zwischen Pods aufteilt.
+
+Die Topology-Spread-Regel versucht, MongoDB-Pods über Kubernetes-Nodes zu verteilen. Mit einem Node, wie beim normalen Minikube-Profil, laufen alle drei Pods auf demselben Node. Ein Minikube-Mehrknotenprofil kann Verteilung und Failover testen, stellt aber keine drei unabhängigen physischen Server dar.
 
 ## HashiCorp Vault
 
-Eine lokale Demo-Integration mit Vault KV v2 und dem Vault Secrets Operator ist eingerichtet. VSO synchronisiert Admin-Zugangsdaten, Replica-Set-Keyfile und individuelle TLS-Zertifikate in die Kubernetes-Secrets, die das Chart erwartet. Vault ist dabei die Quelle der Werte; Kubernetes-Secrets existieren weiterhin und benötigen passende Kubernetes-RBAC-Rechte.
+Die optionale Vault-Demo verwendet Vault, Vault Secrets Operator, Kubernetes-Authentifizierung und Vault KV v2. Der Operator synchronisiert Zugangsdaten, Keyfile und TLS-Material aus Vault in Kubernetes-Secrets, die das Helm Chart referenziert. Die MongoDB-Pods lesen die Werte weiterhin aus Kubernetes-Secrets.
 
-Die TLS-Synchronisierungen lösen bei einer Zertifikatsänderung einen StatefulSet-Rollout aus. Eine Passwortänderung in Vault ändert das gespeicherte MongoDB-Benutzerpasswort nicht automatisch. Das Keyfile muss wegen seiner gemeinsamen Nutzung durch alle Replica-Set-Mitglieder kontrolliert rotiert werden.
+Die Entwicklungsinstallation und die dazugehörigen Ressourcen befinden sich in `vault/README.md`, `vault/vso-mongodb.yaml` und `vault/mongodb-read.hcl`. Das Dev-Vault nutzt In-Memory-Speicher und einen Demo-Root-Token. Diese Konfiguration dient nur lokalen Tests und darf nicht als produktive Vorlage eingesetzt werden. Eine Secret-Rotation in Vault aktualisiert nicht automatisch das bereits in MongoDB gespeicherte Administratorpasswort; die Datenbank und Vault müssen koordiniert aktualisiert werden.
 
-Die getestete lokale Vault-Installation lief im Dev-Modus mit In-Memory-Speicher. Sie ist nur für die Minikube-Demo gedacht; bei einem Neustart gehen Vault-Daten verloren. Produktionsspeicher, TLS zu Vault, Bootstrap/Unseal, Disaster-Recovery und automatisierte koordinierte Rotation sind noch offen. Details und Manifeste stehen in [`vault/README.md`](vault/README.md) und [`vault/vso-mongodb.yaml`](vault/vso-mongodb.yaml).
+## Prüfungen und bekannte Grenzen
+
+Im lokalen Minikube-Setup wurden Chart-Rendering und Anpassungen, Replica-Set-Status, Neustart eines Mitglieds, Backup-Erstellung, Aufbewahrung, datenbankspezifischer Restore, vollständiger Restore in einer isolierten Testinstanz sowie die Verteilung auf drei Minikube-Nodes geprüft. Die vollständige Wiederherstellung wurde isoliert getestet, um die aktive Datenbank nicht zu überschreiben.
+
+Die Vault-Demo wurde auf Synchronisierung von Authentifizierung, Keyfile und TLS-Secrets geprüft. Vault läuft dabei mit flüchtigem Dev-Speicher. Ein produktiver Vault-Betrieb, produktive Schlüsselrotation, externe Backup-Speicherung und ein eigenes automatisches Kapazitätsmanagement sind nicht Teil dieses Charts.
