@@ -54,6 +54,21 @@ kubectl rollout status statefulset/mongodb -n mongodb --timeout=5m
 
 Für ein bereits laufendes Minikube-Profil genügt `minikube start`. Bei einem anderen Release-Namen, Namespace oder DNS-Namen müssen die Zertifikate passende Subject Alternative Names enthalten.
 
+### Start unter Windows (PowerShell)
+
+Öffne PowerShell und wechsle in den Projektordner. Passe den Beispielpfad an den Speicherort deines Klons an:
+
+```powershell
+Set-Location "C:\Pfad\zu\mongodb-projekt"
+minikube start
+kubectl create namespace mongodb
+helm lint .\mongodb-chart
+helm upgrade --install mongodb .\mongodb-chart --namespace mongodb --wait --timeout 10m
+```
+
+Die Statusbefehle ohne Bash-Zeilenfortsetzung funktionieren in PowerShell unverändert. Die TLS-, Authentifizierungs- und Keyfile-Secrets müssen wie unter macOS/Linux zuvor im Cluster erstellt oder durch Vault Secrets Operator synchronisiert worden sein.
+
+
 ## Anpassungen
 
 Die Standardwerte und ihre Kommentare stehen in [`mongodb-chart/values.yaml`](mongodb-chart/values.yaml). Änderungen lassen sich in einer eigenen Werte-Datei bündeln, zum Beispiel `my-values.yaml`, und mit `-f my-values.yaml` übergeben. Geheimnisse gehören nicht in diese Datei.
@@ -89,6 +104,12 @@ helm template mongodb ./mongodb-chart --namespace mongodb \
   --set capacityAllocation.total.requests.cpuMilli=1800 \
   --set capacityAllocation.total.requests.memoryMi=2304 \
   --set-string backup.schedule="15 4 * * *"
+```
+
+PowerShell verwendet `\` nicht als Zeilenfortsetzung. Dasselbe Beispiel dort als einzelne Zeile:
+
+```powershell
+helm template mongodb .\mongodb-chart --namespace mongodb --set storage.size=15Gi --set capacityAllocation.total.requests.cpuMilli=1800 --set capacityAllocation.total.requests.memoryMi=2304 --set-string backup.schedule="15 4 * * *"
 ```
 
 Ein bereits initialisiertes Replica Set lässt sich nicht gefahrlos durch bloßes Ändern von `replicaSet.members` skalieren. Für zusätzliche Mitglieder braucht es passende Zertifikate und eine kontrollierte Replica-Set-Konfigurationsänderung. Außerdem sind Änderungen am unveränderlichen `StatefulSet`-Selector nicht per normalem Helm-Upgrade möglich.
@@ -127,17 +148,31 @@ kubectl --context=minikube get vaultstaticsecrets -n mongodb
 
 Eine Passwortänderung hat zwei Schritte: MongoDB muss das neue Passwort für den Benutzer speichern, und anschließend muss der Vault-Wert aktualisiert werden. Nur das Kubernetes-Secret oder Vault zu ändern aktualisiert das in MongoDB gespeicherte Passwort nicht.
 
-1. Erzeuge ein neues ASCII-Passwort lokal und halte es aus Git heraus. Beispiel: `openssl rand -hex 32 > certs/admin-password.txt`.
+1. Erzeuge ein neues ASCII-Passwort lokal und halte es aus Git heraus. Unter macOS/Linux zum Beispiel: `openssl rand -hex 32 > certs/admin-password.txt`. Unter Windows PowerShell kannst du stattdessen einen kryptografischen Zufallswert erzeugen:
+
+   ```powershell
+   New-Item -ItemType Directory -Force .\certs | Out-Null
+   $bytes = New-Object byte[] 32
+   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+   $rng.GetBytes($bytes)
+   $password = -join ($bytes | ForEach-Object { $_.ToString('x2') })
+   Set-Content -Path .\certs\admin-password.txt -Value $password -NoNewline -Encoding ascii
+   $rng.Dispose()
+   ```
 2. Verbinde dich mit dem derzeit gültigen Passwort über `mongosh` zur Primary und ändere das MongoDB-Passwort interaktiv mit `db.getSiblingDB("admin").changeUserPassword("admin", passwordPrompt())`. `passwordPrompt()` wartet auf die Eingabe und schreibt das Passwort nicht in den Befehl.
 3. Aktualisiere danach den Vault-Eintrag `secret/mongodb/auth`, Feld `password`, mit demselben neuen Wert. Verwende für den Vault-Zugriff die lokale Entwicklungsanleitung in `vault/README.md`; dort steht auch, wie die Eingabe ohne Anzeige in der Shell erfolgt.
 4. Warte, bis `mongodb-auth-from-vault` wieder synchronisiert und bereit ist. Prüfe anschließend die Anmeldung mit `mongosh --password`, damit die Eingabeaufforderung das Passwort verdeckt.
 5. Lösche die temporäre Passwortdatei nach erfolgreicher Prüfung und entferne das Passwort aus der Zwischenablage.
+
+Unter Windows PowerShell löschst du die Datei mit `Remove-Item .\certs\admin-password.txt` und leerst die Zwischenablage mit `Set-Clipboard -Value ''`.
 
 Das lokale Demo-Vault ist im Entwicklungsmodus mit In-Memory-Speicher eingerichtet. Ein Neustart kann die dort gespeicherten Werte löschen. Es ist nicht für produktive Geheimnisverwaltung geeignet. Für produktive Nutzung muss Vault mit dauerhaftem Speicher, geeigneter Authentifizierung, TLS und gesicherter Entsiegelung konfiguriert werden.
 
 ## Backups und Wiederherstellung
 
 Backups sind standardmäßig aktiviert. Der CronJob erstellt täglich um 03:00 Uhr in der Zeitzone `Europe/Zurich` ein komprimiertes MongoDB-Archiv. Die Dateien liegen auf einem separaten Backup-PVC, standardmäßig mit 20 GiB. Backups werden nach 30 Tagen gelöscht. Zeitplan, Zeitzone, Aufbewahrungsdauer und PVC sind über `backup.*` anpassbar.
+
+### Manuelles Backup (macOS/Linux)
 
 Ein manuelles Backup lässt sich aus dem CronJob erstellen:
 
@@ -150,9 +185,59 @@ kubectl logs job/mongodb-backup-manual -n mongodb
 
 Der Job muss erfolgreich mit `Complete` enden. `0/1 Completed` bei seinem Pod ist normal: Der Einmal-Container ist beendet; entscheidend ist der Jobstatus `Complete` und der erfolgreiche Logeintrag „Backup erstellt“.
 
-Die Archive liegen auf dem PVC `mongodb-backups` unter `/backups`. Zum Anzeigen der Dateien kann ein temporärer Pod das PVC mounten. Danach den temporären Pod wieder löschen. Ein Backup auf demselben Cluster schützt nicht vor Verlust des Clusters oder seines Speichers; wichtige Archive zusätzlich außerhalb des Clusters sichern.
+Die Archive liegen auf dem PVC `mongodb-backups` unter `/backups`. Das PVC gehört zum Kubernetes-Cluster, in dem das Backup erstellt wurde. Wähle deshalb denselben Kubernetes-Kontext wie beim Backup. Bei der bisherigen lokalen Installation war das meist `minikube`; das Mehrknotenprofil heißt `mongodb-multinode` und hat ein eigenes Backup-Volume.
 
-### Datenbank wiederherstellen
+### Backup-Dateien anzeigen (macOS/Linux)
+
+Aus dem Projektordner kannst du einen kurzlebigen Pod starten, der das Backup-Volume einbindet:
+
+```bash
+kubectl --context=minikube run backup-list -n mongodb \
+  --image=busybox:1.36 --restart=Never \
+  --overrides='{"spec":{"containers":[{"name":"backup-list","image":"busybox:1.36","command":["sh","-c","ls -lh /backups"],"volumeMounts":[{"name":"backups","mountPath":"/backups"}]}],"volumes":[{"name":"backups","persistentVolumeClaim":{"claimName":"mongodb-backups"}}]}}'
+kubectl --context=minikube get pod backup-list -n mongodb
+kubectl --context=minikube logs backup-list -n mongodb
+kubectl --context=minikube delete pod backup-list -n mongodb
+```
+
+Warte bei `get pod`, bis der Status `Completed` lautet, und lies dann die Logs. Die Archivdatei ist kein normales lesbares Dokument. Um ihre MongoDB-Daten zu öffnen, musst du sie in eine MongoDB-Instanz wiederherstellen.
+
+### Manuelles Backup unter Windows (PowerShell)
+
+```powershell
+$context = "minikube"
+kubectl --context $context delete job mongodb-backup-manual -n mongodb --ignore-not-found
+kubectl --context $context create job mongodb-backup-manual --from=cronjob/mongodb-backup -n mongodb
+kubectl --context $context get job mongodb-backup-manual -n mongodb
+kubectl --context $context logs job/mongodb-backup-manual -n mongodb
+```
+
+Der Job sollte `Complete` melden. Falls du mehrere manuelle Backups nacheinander erstellst, verwende jeweils einen neuen Jobnamen oder lösche den alten Job zuerst.
+
+### Backup-Dateien anzeigen (Windows PowerShell)
+
+Öffne PowerShell und wechsle in den Projektordner, der `mongodb-chart` enthält, zum Beispiel:
+
+```powershell
+Set-Location "C:\Pfad\zu\mongodb-projekt"
+```
+
+Setze `$context` auf den Cluster, auf dem das Backup erstellt wurde. Der Standard ist hier `minikube`:
+
+```powershell
+$context = "minikube"
+$overrides = '{"spec":{"containers":[{"name":"backup-list","image":"busybox:1.36","command":["sh","-c","ls -lh /backups"],"volumeMounts":[{"name":"backups","mountPath":"/backups"}]}],"volumes":[{"name":"backups","persistentVolumeClaim":{"claimName":"mongodb-backups"}}]}}'
+kubectl --context $context run backup-list -n mongodb --image=busybox:1.36 --restart=Never --overrides=$overrides
+kubectl --context $context get pod backup-list -n mongodb
+kubectl --context $context logs backup-list -n mongodb
+kubectl --context $context delete pod backup-list -n mongodb
+```
+
+Warte ebenfalls auf `Completed`, bevor du die Logs abrufst. Falls du eine andere Release- oder PVC-Bezeichnung verwendest, passe `mongodb-backups` im Befehl an.
+
+Ein Backup auf demselben Cluster schützt nicht vor Verlust des Clusters oder seines Speichers; wichtige Archive zusätzlich außerhalb des Clusters sichern.
+
+### Datenbank wiederherstellen (macOS/Linux)
 
 Ein datenbankspezifischer Restore benötigt den Archivdateinamen und einen Datenbanknamen:
 
@@ -165,7 +250,7 @@ helm upgrade --install mongodb ./mongodb-chart \
   --set-string restore.archiveFile=mongodb-YYYYMMDDTHHMMSSZ.archive.gz
 ```
 
-### Vollständige Wiederherstellung
+### Vollständige Wiederherstellung (macOS/Linux)
 
 Für eine vollständige Wiederherstellung wird `restore.fullRestore=true` gesetzt und kein Datenbankname angegeben:
 
@@ -179,7 +264,35 @@ helm upgrade --install mongodb ./mongodb-chart \
 
 Der Restore verwendet `--drop` und kann vorhandene Daten überschreiben. Die Eingaben werden durch das Template geprüft: Der Archivwert muss ein Dateiname ohne Pfad sein; Datenbank-Restore und vollständiger Restore dürfen nicht gleichzeitig gewählt werden. Ein Restore-Job sollte nur nach Prüfung des Archivs und mit klarer Kenntnis des Ziels gestartet werden.
 
-Restore anschließend wieder deaktivieren:
+### Restore unter Windows (PowerShell)
+
+Wechsle zuerst in den Ordner, der `mongodb-chart` enthält. Ersetze `$archive` durch einen Dateinamen aus der Backup-Liste und `$database` durch den Datenbanknamen im Archiv. Der folgende Restore spielt nur diese Datenbank in die aktuelle MongoDB-Installation ein:
+
+```powershell
+$context = "minikube"
+$archive = "mongodb-YYYYMMDDTHHMMSSZ.archive.gz"
+$database = "backup_test"
+kubectl --context $context delete job mongodb-restore -n mongodb --ignore-not-found
+helm --kube-context $context upgrade --install mongodb .\mongodb-chart --namespace mongodb --reuse-values --no-hooks --set restore.enabled=true --set restore.fullRestore=false --set-string restore.database=$database --set-string restore.archiveFile=$archive
+kubectl --context $context get job mongodb-restore -n mongodb
+kubectl --context $context logs job/mongodb-restore -n mongodb
+```
+
+Für einen **vollständigen Restore** verwendest du stattdessen diesen Helm-Befehl. Lasse dabei `$database` weg:
+
+```powershell
+helm --kube-context $context upgrade --install mongodb .\mongodb-chart --namespace mongodb --reuse-values --no-hooks --set restore.enabled=true --set restore.fullRestore=true --set-string restore.archiveFile=$archive
+```
+
+Restore danach deaktivieren:
+
+```powershell
+helm --kube-context $context upgrade --install mongodb .\mongodb-chart --namespace mongodb --reuse-values --no-hooks --set restore.enabled=false
+```
+
+PowerShell verwendet nicht `\` als Zeilenfortsetzung; deshalb stehen die Helm-Befehle hier jeweils in einer Zeile. `--reuse-values` übernimmt die bestehenden Helm-Werte. `--drop` löscht beim Restore vorhandene Collections im ausgewählten Ziel. Ein vollständiger Restore kann entsprechend mehr Daten ersetzen. Prüfe Archiv, Datenbank und Kontext vor dem Start. Zum Testen verwende eine getrennte Testinstanz.
+
+Restore anschließend unter macOS/Linux wieder deaktivieren:
 
 ```bash
 helm upgrade --install mongodb ./mongodb-chart \
@@ -205,7 +318,7 @@ Die Topology-Spread-Regel versucht, MongoDB-Pods über Kubernetes-Nodes zu verte
 
 Die optionale Vault-Demo verwendet Vault, Vault Secrets Operator, Kubernetes-Authentifizierung und Vault KV v2. Der Operator synchronisiert Zugangsdaten, Keyfile und TLS-Material aus Vault in Kubernetes-Secrets, die das Helm Chart referenziert. Die MongoDB-Pods lesen die Werte weiterhin aus Kubernetes-Secrets.
 
-Die Entwicklungsinstallation und die dazugehörigen Ressourcen befinden sich in `vault/README.md`, `vault/vso-mongodb.yaml` und `vault/mongodb-read.hcl`. Das Dev-Vault nutzt In-Memory-Speicher und einen Demo-Root-Token. Diese Konfiguration dient nur lokalen Tests und darf nicht als produktive Vorlage eingesetzt werden. Eine Secret-Rotation in Vault aktualisiert nicht automatisch das bereits in MongoDB gespeicherte Administratorpasswort; die Datenbank und Vault müssen koordiniert aktualisiert werden.
+Die Entwicklungsinstallation und die dazugehörigen Ressourcen befinden sich in `vault/README.md`, `vault/vso-mongodb.yaml` und `vault/mongodb-read.hcl`. Die Shell-Befehle in `vault/README.md` verwenden POSIX-Syntax für macOS/Linux. Unter Windows führe diese Vault-Befehle in WSL oder Git Bash aus; die PowerShell-Beispiele in dieser README decken die normalen Helm-, kubectl-, Backup- und Restore-Schritte ab. Das Dev-Vault nutzt In-Memory-Speicher und einen Demo-Root-Token. Diese Konfiguration dient nur lokalen Tests und darf nicht als produktive Vorlage eingesetzt werden. Eine Secret-Rotation in Vault aktualisiert nicht automatisch das bereits in MongoDB gespeicherte Administratorpasswort; die Datenbank und Vault müssen koordiniert aktualisiert werden.
 
 ## Prüfungen und bekannte Grenzen
 
