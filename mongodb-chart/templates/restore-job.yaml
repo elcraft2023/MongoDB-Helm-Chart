@@ -17,22 +17,28 @@ metadata:
 spec:
   backoffLimit: 0
   template:
+    metadata:
+      annotations:
+        {{- include "mongodb-chart.vaultAgentAnnotations" (dict "root" . "container" "restore") | nindent 8 }}
     spec:
       restartPolicy: Never
-      automountServiceAccountToken: false
+      serviceAccountName: {{ .Values.auth.serviceAccountName | quote }}
       containers:
         - name: restore
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          env:
-            - name: MONGO_USERNAME
-              value: {{ .Values.auth.username | quote }}
-            - name: MONGO_PASSWORD
-              value: {{ include "mongodb-chart.authPassword" . | quote }}
           command:
             - sh
             - -ec
             - |
+              password_file=/vault/secrets/admin-password
+              if [ ! -s "$password_file" ]; then
+                echo "Vault-Agent hat kein Admin-Passwort bereitgestellt"
+                exit 1
+              fi
+              MONGO_USERNAME={{ .Values.auth.username | quote }}
+              MONGO_PASSWORD="$(cat "$password_file")"
+              export MONGO_USERNAME MONGO_PASSWORD
               archive="/backups/{{ $archive }}"
               if [ ! -f "$archive" ]; then
                 echo "Backup-Datei nicht gefunden: $archive"

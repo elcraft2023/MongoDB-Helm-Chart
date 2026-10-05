@@ -15,24 +15,31 @@ spec:
       backoffLimit: 2
       ttlSecondsAfterFinished: 86400
       template:
+        metadata:
+          annotations:
+            {{- include "mongodb-chart.vaultAgentAnnotations" (dict "root" . "container" "backup") | nindent 12 }}
         spec:
           restartPolicy: OnFailure
-          automountServiceAccountToken: false
+          serviceAccountName: {{ .Values.auth.serviceAccountName | quote }}
           containers:
             - name: backup
               image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               env:
-                - name: MONGO_USERNAME
-                  value: {{ .Values.auth.username | quote }}
-                - name: MONGO_PASSWORD
-                  value: {{ include "mongodb-chart.authPassword" . | quote }}
                 - name: RETENTION_DAYS
                   value: {{ .Values.backup.retentionDays | quote }}
               command:
                 - /bin/sh
                 - -ec
                 - |
+                  password_file=/vault/secrets/admin-password
+                  if [ ! -s "$password_file" ]; then
+                    echo "Vault-Agent hat kein Admin-Passwort bereitgestellt"
+                    exit 1
+                  fi
+                  MONGO_USERNAME={{ .Values.auth.username | quote }}
+                  MONGO_PASSWORD="$(cat "$password_file")"
+                  export MONGO_USERNAME MONGO_PASSWORD
                   timestamp="$(date -u +%Y%m%dT%H%M%SZ)"
                   backup_file="/backups/mongodb-${timestamp}.archive.gz"
                   find /backups -maxdepth 1 -type f -name 'mongodb-*.archive.gz' -mmin "+$((RETENTION_DAYS * 1440))" -delete

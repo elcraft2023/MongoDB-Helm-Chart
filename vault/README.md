@@ -1,30 +1,47 @@
-# HashiCorp Vault integration (demo)
+# HashiCorp Vault integration
 
-This setup uses Vault KV v2 and the Vault Secrets Operator (VSO). VSO syncs MongoDB's internal keyfile and TLS material into Kubernetes Secrets consumed by the chart. The MongoDB administrator password is separate: Helm loads it from the local `certs/admin-password.txt` file with `--set-file auth.password=certs/admin-password.txt`; VSO does not sync that password.
+The integration uses Vault KV v2, Vault Agent Injector, and Vault Secrets
+Operator (VSO):
+
+- Vault Agent reads the MongoDB administrator password directly from Vault and
+  renders it as `/vault/secrets/admin-password` in MongoDB, bootstrap, backup,
+  and restore pods. The password is not a Helm value or Kubernetes Secret.
+- VSO synchronizes only the internal replica-set keyfile and TLS material to
+  Kubernetes Secrets consumed by the chart.
 
 ## Prerequisites
 
-- A `mongodb` namespace and the MongoDB Helm release named `mongodb`.
-- Vault reachable as `vault.vault.svc.cluster.local:8200` from the cluster.
-- Vault Kubernetes authentication enabled and configured, plus VSO installed.
-- A Vault Kubernetes auth role named `mongodb-reader`, bound to service account `mongodb-vault-reader` in namespace `mongodb`.
-- The policy in `mongodb-read.hcl` attached to that role.
-- KV v2 mounted at `secret`.
+- A `mongodb` namespace and a Vault service reachable from the cluster.
+- Vault KV v2 mounted at `secret`.
+- Vault Kubernetes authentication configured.
+- Vault Agent Injector enabled and its mutating webhook ready.
+- Vault Secrets Operator installed for the keyfile and TLS secrets.
+- A Kubernetes auth role `mongodb-reader`, bound to service account
+  `mongodb-vault-reader` in namespace `mongodb`, with the policy in
+  `mongodb-read.hcl`.
 
-The versions used in the local demo were Vault Helm chart `0.34.1` and VSO `1.6.0`. For a fresh disposable Minikube demo, install them with:
+The optional disposable Minikube setup uses Vault chart `0.34.1` and VSO
+`1.6.0`. The injector must be enabled:
 
 ```sh
 helm repo add hashicorp https://helm.releases.hashicorp.com
 helm repo update
 helm upgrade --install vault hashicorp/vault --version 0.34.1 \
   --namespace vault --create-namespace \
-  --set server.dev.enabled=true --set injector.enabled=false --wait --timeout 5m
+  --set server.dev.enabled=true --set injector.enabled=true --wait --timeout 5m
 helm upgrade --install vault-secrets-operator hashicorp/vault-secrets-operator \
   --version 1.6.0 --namespace vault-secrets-operator --create-namespace \
   --wait --timeout 5m
 ```
 
-Configure Kubernetes auth, the read-only policy, and its role in the demo Vault. The commands use Vault's dev-only `root` token inside the Vault pod; never reuse this pattern for a persistent or production Vault:
+The dev server uses in-memory storage and a demo root token. It is only for a
+disposable local cluster, not production.
+
+## Kubernetes authentication and policy
+
+Configure the Kubernetes auth backend, write the restricted policy, and bind
+the role. These example commands use the dev-only `root` token inside the Vault
+pod; never use that pattern for a persistent or production Vault.
 
 ```sh
 kubectl create clusterrolebinding vault-auth-delegator \
@@ -54,54 +71,117 @@ kubectl exec -n vault vault-0 -- sh -ec '
 '
 ```
 
-The three prerequisites above create the auth backend, policy, and role; the manifest creates the service account. Populate the KV paths below from the local ignored files using an authenticated Vault CLI session. Do not put secret values directly in shell commands or commit them.
+The Vault Agent Injector authenticates pods using the
+`mongodb-vault-reader` ServiceAccount. The chart references this account by
+default through `auth.serviceAccountName`.
 
-The working local test used a Vault dev server with in-memory storage and a root token. That is suitable only for this disposable Minikube demo: restarting/recreating Vault loses the stored data and root token. Use persistent storage, TLS, and a proper initialization/unseal or auto-unseal setup before relying on it. Never commit a Vault token, initialized Vault data, password, private key, certificate, or Kubernetes Secret export.
+## Store values in Vault
 
-## Vault secret layout
+Use the Vault UI or another authenticated Vault client. In KV v2, create these
+paths and fields:
 
-Populate these KV v2 paths with the listed fields. Import the existing local credentials and certificates without printing their contents or putting them in chart values:
+| Vault path | Fields | Consumer |
+| --- | --- | --- |
+| `secret/mongodb/auth` | `password` | Vault Agent file; not a Kubernetes Secret |
+| `secret/mongodb/internal-auth` | `keyfile` | VSO creates `mongodb-internal-auth` |
+| `secret/mongodb/tls/mongo-0` | `tls.crt`, `tls.key`, `ca.crt` | VSO creates `mongo-0-tls` |
+| `secret/mongodb/tls/mongo-1` | `tls.crt`, `tls.key`, `ca.crt` | VSO creates `mongo-1-tls` |
+| `secret/mongodb/tls/mongo-2` | `tls.crt`, `tls.key`, `ca.crt` | VSO creates `mongo-2-tls` |
 
-| Vault path | Fields |
-| --- | --- |
-| `secret/mongodb/internal-auth` | `keyfile` |
-| `secret/mongodb/tls/mongo-0` | `tls.crt`, `tls.key`, `ca.crt` |
-| `secret/mongodb/tls/mongo-1` | `tls.crt`, `tls.key`, `ca.crt` |
-| `secret/mongodb/tls/mongo-2` | `tls.crt`, `tls.key`, `ca.crt` |
+Enter the administrator password directly into Vault at `secret/mongodb/auth`,
+field `password`. Do not create or retain a local admin-password file, place the
+value in Helm Values, or put it in a command line.
 
-The keyfile and certificate source files belong in the ignored local `certs/` directory. The MongoDB chart continues to reference their destination Kubernetes Secrets by name. Create the administrator password file separately; do not add its value to Vault or commit it.
+For the KV v2 mount `secret`, the Vault Agent annotation reads API path
+`secret/data/mongodb/auth`. Its template extracts `.Data.data.password` and
+writes the file `/vault/secrets/admin-password` inside the selected container.
+The Vault Agent runs in pre-population-only mode: it writes the file before the
+application starts and does not continuously refresh it.
+
+Keyfile and TLS values are still synchronized to Kubernetes Secrets by VSO.
+Never commit Vault tokens, certificates, private keys, passwords, Vault data,
+or Kubernetes Secret exports.
 
 ## Apply and verify
 
-From the repository root, apply `vault/vso-mongodb.yaml` after Vault, VSO, the KV values, and the Kubernetes auth role are ready:
+Apply the VSO resources after Vault, KV values, Kubernetes auth, and the policy
+are ready:
 
 ```sh
 kubectl apply -f vault/vso-mongodb.yaml
 kubectl get vaultstaticsecrets -n mongodb
-kubectl get pods -n mongodb
 ```
 
-Each `VaultStaticSecret` should show `SYNCED`, `HEALTHY`, and `READY` as `True`. The TLS resources request a StatefulSet rollout when their source values change, so the init containers copy the updated certificates into the pod. If the Helm release or namespace uses different names, update the destination names and `rolloutRestartTargets` accordingly.
+Wait until each `VaultStaticSecret` is synchronized and healthy. Ensure the
+Vault Agent Injector webhook is ready before creating MongoDB pods. Install or
+upgrade the MongoDB chart without supplying a password value:
 
-For an existing installation that previously synchronized `mongodb-auth`, first upgrade the Helm release with `--set-file auth.password=certs/admin-password.txt` using the password MongoDB currently accepts. Reapply the updated `mongodb-read` policy using the policy command above. Then remove the old password synchronizer; applying this updated manifest does not delete resources that are no longer listed:
+```sh
+helm lint ./mongodb-chart
+helm upgrade --install mongodb ./mongodb-chart \
+  --namespace mongodb --wait --timeout 10m
+kubectl get pods -n mongodb
+kubectl rollout status statefulset/mongodb -n mongodb --timeout=5m
+```
+
+Each MongoDB, bootstrap, backup, and restore pod template uses Vault Agent
+annotations and the `mongodb-vault-reader` ServiceAccount. The agent renders
+the password only into the application's injected file volume. The application
+container checks that the file exists before starting or running a job.
+
+For an existing installation that previously synchronized `mongodb-auth`,
+write the currently valid MongoDB password into Vault first and apply the
+updated policy and VSO manifest. Build a values file containing only the
+non-secret overrides required by the deployment, then upgrade with
+`--reset-values` (not `--reuse-values`) so a previously stored
+`auth.password` value is not copied into the new Helm release:
+
+```sh
+helm upgrade --install mongodb ./mongodb-chart \
+  --namespace mongodb --reset-values -f production-values.yaml \
+  --wait --timeout 10m
+```
+
+Do not put the password in `production-values.yaml`. After verifying the new
+pods and authentication, remove the obsolete password synchronizer and Secret
+only after confirming no other workload uses them:
 
 ```sh
 kubectl delete vaultstaticsecret mongodb-auth-from-vault -n mongodb --ignore-not-found
-```
-
-After confirming no other workload uses the old `mongodb-auth` Secret, remove it as well:
-
-```sh
 kubectl delete secret mongodb-auth -n mongodb --ignore-not-found
 ```
 
-## Rotation notes
+An older Helm release revision may still contain the password in its stored
+values. `--reset-values` cleans the new revision; it does not automatically
+rewrite all previous release history. If policy requires purging that history,
+plan an explicit Helm-history cleanup or uninstall/reinstall procedure with the
+platform owner. Removing rollback history has operational consequences.
 
-- The smoke-test secret used to verify VSO refresh was removed after the rotation test passed.
-- The MongoDB administrator password is not managed by this Vault integration. Change it in MongoDB and then pass the new local file to Helm using `--set-file auth.password=certs/admin-password.txt`.
-- TLS updates trigger a StatefulSet rollout through the three TLS `VaultStaticSecret` resources.
-- The replica-set keyfile is shared by all members. Its rotation requires a planned, coordinated MongoDB procedure; this manifest deliberately does not automatically restart the set when that key changes.
+## Password rotation
+
+Vault Agent uses a startup-only file, so a Vault KV update by itself does not
+change the password already stored in MongoDB and does not refresh existing pod
+files. Coordinate rotation:
+
+1. Change the MongoDB admin user's password on the current Primary using the
+   existing valid credentials.
+2. Update `secret/mongodb/auth`, field `password`, in Vault to the same value.
+3. Restart the StatefulSet so MongoDB pods fetch the new file:
+
+   ```sh
+   kubectl rollout restart statefulset/mongodb -n mongodb
+   kubectl rollout status statefulset/mongodb -n mongodb --timeout=5m
+   ```
+4. Verify MongoDB authentication and the replica-set status. Newly created
+   bootstrap, backup, and restore pods will also read the current Vault value.
+
+Use a planned, coordinated procedure; restarting members can affect availability.
+The replica-set keyfile is a separate credential and needs its own coordinated
+rotation procedure.
 
 ## Scope
 
-This is a working local integration guide and manifest set, not a production Vault deployment. Vault bootstrap, policy/role creation, certificate provisioning, storage durability, TLS to Vault, disaster recovery, and a complete automated credential-rotation workflow still need environment-specific configuration.
+This is an integration example, not a production Vault deployment. Persistent
+Vault storage, TLS to Vault, secure initialization/unseal, restricted RBAC,
+external backups, monitoring, and a fully automated credential-rotation
+workflow need environment-specific configuration.

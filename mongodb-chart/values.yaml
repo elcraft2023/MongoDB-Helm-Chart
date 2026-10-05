@@ -49,7 +49,9 @@ resources:
 auth:
   enabled: true
   username: admin
-  password: ""
+  vaultRole: mongodb-reader
+  vaultPath: secret/data/mongodb/auth
+  serviceAccountName: mongodb-vault-reader
 
 internalAuth:
   existingSecret: mongodb-internal-auth

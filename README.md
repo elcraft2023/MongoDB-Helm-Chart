@@ -2,7 +2,7 @@
 
 Ein anpassbares Helm Chart für ein MongoDB Replica Set auf Kubernetes. Es richtet standardmäßig drei MongoDB-Mitglieder mit TLS, interner Replica-Set-Authentifizierung, dauerhaftem Speicher und optionalen Backups ein.
 
-> **Hinweis zu Geheimnissen:** Keine echten Passwörter, privaten Schlüssel, Zertifikate oder Kubernetes-Secret-Inhalte committen. `certs/` ist durch `.gitignore` ausgeschlossen. Das MongoDB-Administratorpasswort wird aus `certs/admin-password.txt` mit Helm `--set-file` geladen, nicht aus einem Kubernetes-Secret. Helm speichert den Wert dabei im Release und im Pod-Manifest; entsprechend müssen Zugriffe auf Helm-Releases und Pods geschützt werden.
+> **Hinweis zu Geheimnissen:** Keine Passwörter, privaten Schlüssel, Zertifikate oder Kubernetes-Secret-Inhalte committen. Das MongoDB-Administratorpasswort wird direkt aus HashiCorp Vault durch den Vault Agent Injector in die Pods eingebunden. Es steht weder in Helm-Values noch in einem Kubernetes-Secret. TLS- und Keyfile-Material werden weiterhin als Kubernetes-Secrets bereitgestellt.
 
 ## Inhalt
 
@@ -31,17 +31,18 @@ Das Chart enthält:
 
 ## Voraussetzungen und Start
 
-Benötigt werden ein Kubernetes-Cluster sowie `kubectl` und Helm. Für den lokalen Versuch wurde Minikube verwendet.
+Benötigt werden ein Kubernetes-Cluster, `kubectl`, Helm, HashiCorp Vault mit aktiviertem Vault Agent Injector und Vault Secrets Operator. Für den lokalen Versuch wurde Minikube verwendet. Die Vault-Kubernetes-Authentifizierung, das Vault-KV-Passwort sowie TLS- und Keyfile-Werte müssen vorbereitet sein. Details dazu stehen in [`vault/README.md`](vault/README.md).
 
-Erstelle `certs/admin-password.txt` mit dem Administratorpasswort, das MongoDB verwenden soll (für ein neues Replica Set zum Beispiel mit `openssl rand -hex 32 > certs/admin-password.txt`). Das Chart liest es beim Installieren mit `--set-file`; TLS- und Keyfile-Secrets müssen weiterhin vor dem Installieren im Ziel-Namespace vorhanden sein. Alternativ kann Vault Secrets Operator diese TLS- und Keyfile-Secrets aus Vault bereitstellen.
+Wende die Vault-Ressourcen an und warte, bis die TLS- und Keyfile-Secrets synchronisiert sind. Das Administratorpasswort bleibt in Vault und wird nicht lokal in einer Datei abgelegt.
 
 ```bash
 minikube start
 kubectl create namespace mongodb
-helm lint ./mongodb-chart --set-file auth.password=certs/admin-password.txt
+kubectl apply -f vault/vso-mongodb.yaml
+helm lint ./mongodb-chart
 helm upgrade --install mongodb ./mongodb-chart \
   --namespace mongodb \
-  --set-file auth.password=certs/admin-password.txt \
+  --reset-values \
   --wait \
   --timeout 10m
 ```
@@ -63,11 +64,12 @@ Für ein bereits laufendes Minikube-Profil genügt `minikube start`. Bei einem a
 Set-Location "C:\Pfad\zu\mongodb-projekt"
 minikube start
 kubectl create namespace mongodb
-helm lint .\mongodb-chart --set-file auth.password=.\certs\admin-password.txt
-helm upgrade --install mongodb .\mongodb-chart --namespace mongodb --set-file auth.password=.\certs\admin-password.txt --wait --timeout 10m
+kubectl apply -f .\vault\vso-mongodb.yaml
+helm lint .\mongodb-chart
+helm upgrade --install mongodb .\mongodb-chart --namespace mongodb --reset-values --wait --timeout 10m
 ```
 
-Die Statusbefehle ohne Bash-Zeilenfortsetzung funktionieren in PowerShell unverändert. Die TLS- und Keyfile-Secrets müssen wie unter macOS/Linux zuvor im Cluster erstellt oder durch Vault Secrets Operator synchronisiert worden sein.
+Die Statusbefehle ohne Bash-Zeilenfortsetzung funktionieren in PowerShell unverändert. Vor dem Helm-Install müssen Vault Agent Injector und VSO bereit sowie die TLS- und Keyfile-Secrets synchronisiert sein.
 
 
 ## Anpassungen
@@ -78,7 +80,7 @@ Vor einer Installation kann Helm die resultierenden Kubernetes-Ressourcen anzeig
 
 ```bash
 helm template mongodb ./mongodb-chart --namespace mongodb -f my-values.yaml \
-  --set-file auth.password=certs/admin-password.txt
+  --set auth.vaultPath=secret/data/mongodb/auth
 ```
 
 Wichtige anpassbare Werte:
@@ -89,7 +91,7 @@ Wichtige anpassbare Werte:
 | Replica Set | `replicaSet.name` setzt den Replica-Set-Namen; `replicaSet.members` legt die Mitgliederzahl fest. |
 | MongoDB-Image | `image.repository`, `image.tag`, `image.pullPolicy` wählen Image und Abrufverhalten. |
 | TLS | `tls.enabled` muss aktiviert bleiben; `tls.memberSecrets` ordnet jedem Pod sein TLS-Secret zu. |
-| Anmeldung | `auth.username` setzt den Administratornamen; `auth.password` muss beim Installieren mit `--set-file auth.password=certs/admin-password.txt` aus der lokalen Passwortdatei geladen werden. |
+| Anmeldung | `auth.username`, `auth.vaultPath`, `auth.vaultRole`, `auth.serviceAccountName` konfigurieren MongoDB-Benutzer sowie Vault Agent und ServiceAccount. |
 | Interne Anmeldung | `internalAuth.existingSecret`, `internalAuth.keyFileKey` bestimmen Secret und Schlüssel für die Replica-Set-Keyfile. |
 | Datenvolumes | `storage.size`, `storage.storageClassName`, `storage.accessModes` konfigurieren die Daten-PVCs. |
 | Service | `service.port` ändert den Service-Port. |
@@ -102,7 +104,6 @@ Beispiel für eine Vorschau mit eigenen Ressourcen, Speichergröße und Sicherun
 
 ```bash
 helm template mongodb ./mongodb-chart --namespace mongodb \
-  --set-file auth.password=certs/admin-password.txt \
   --set storage.size=15Gi \
   --set capacityAllocation.total.requests.cpuMilli=1800 \
   --set capacityAllocation.total.requests.memoryMi=2304 \
@@ -112,28 +113,32 @@ helm template mongodb ./mongodb-chart --namespace mongodb \
 PowerShell verwendet `\` nicht als Zeilenfortsetzung. Dasselbe Beispiel dort als einzelne Zeile:
 
 ```powershell
-helm template mongodb .\mongodb-chart --namespace mongodb --set-file auth.password=.\certs\admin-password.txt --set storage.size=15Gi --set capacityAllocation.total.requests.cpuMilli=1800 --set capacityAllocation.total.requests.memoryMi=2304 --set-string backup.schedule="15 4 * * *"
+helm template mongodb .\mongodb-chart --namespace mongodb --set storage.size=15Gi --set capacityAllocation.total.requests.cpuMilli=1800 --set capacityAllocation.total.requests.memoryMi=2304 --set-string backup.schedule="15 4 * * *"
 ```
 
 Ein bereits initialisiertes Replica Set lässt sich nicht gefahrlos durch bloßes Ändern von `replicaSet.members` skalieren. Für zusätzliche Mitglieder braucht es passende Zertifikate und eine kontrollierte Replica-Set-Konfigurationsänderung. Außerdem sind Änderungen am unveränderlichen `StatefulSet`-Selector nicht per normalem Helm-Upgrade möglich.
 
 ## Secrets und Passwörter
 
-Das Administratorpasswort liegt lokal in `certs/admin-password.txt` und wird über `--set-file auth.password=certs/admin-password.txt` an Helm übergeben. Es wird nicht aus einem Kubernetes-Secret gelesen. Benutzername und Passwort werden als Umgebungswerte in die Pod-Manifeste geschrieben; damit sind sie für entsprechend berechtigte Kubernetes- und Helm-Nutzer sichtbar. Für ein bestehendes Release übergib das aktuell in MongoDB gültige Passwort einmalig beim Upgrade:
+Das MongoDB-Administratorpasswort wird in Vault KV v2 unter `secret/mongodb/auth`,
+Feld `password`, gespeichert. Der Vault Agent Injector authentifiziert sich mit
+dem ServiceAccount `mongodb-vault-reader` und rendert den Wert zur Pod-Startzeit
+als Datei nach `/vault/secrets/admin-password`. Helm erhält den Passwortwert
+nicht als Value.
 
-```bash
-helm upgrade mongodb ./mongodb-chart --namespace mongodb \
-  --reuse-values \
-  --set-file auth.password=certs/admin-password.txt
-```
+Beim Wechsel von einer früheren Chart-Version, die das Passwort als Helm-Value
+gespeichert hat, mit `--reset-values` aktualisieren und ausschließlich
+nicht-geheime Overrides erneut übergeben. `--reuse-values` könnte alte Werte in
+die neue Helm-Revision übernehmen. Frühere Helm-Revisionen können den alten
+Wert weiterhin enthalten; Hinweise zur History-Bereinigung stehen in
+[`vault/README.md`](vault/README.md).
 
-Unter Windows PowerShell:
-
-```powershell
-helm upgrade mongodb .\mongodb-chart --namespace mongodb --reuse-values --set-file auth.password=.\certs\admin-password.txt
-```
-
-Für ein neues Release muss die Datei ebenfalls mit `--set-file` übergeben werden. Bei einer bestehenden Vault-Integration entferne nach dem Upgrade den alten Passwort-Synchronisierer und – sofern keine anderen Workloads ihn nutzen – das bisherige `mongodb-auth`-Secret wie in [`vault/README.md`](vault/README.md) beschrieben.
+Der Wert wird nicht als Kubernetes-Secret angelegt. Er ist zur Laufzeit dennoch
+im Vault-Agent-Volume und im Prozess des berechtigten Containers vorhanden;
+Zugriff auf Pods, Container und Vault-Rolle muss daher eingeschränkt werden.
+Der Agent aktualisiert die Datei nicht laufend. Passwortrotation muss mit einer
+Änderung in MongoDB, dem Update des Vault-Werts und einem Pod-Neustart
+koordiniert werden.
 
 Das Chart benötigt weiterhin folgende Kubernetes-Secrets im selben Namespace wie MongoDB:
 
@@ -142,7 +147,7 @@ Das Chart benötigt weiterhin folgende Kubernetes-Secrets im selben Namespace wi
 | `mongodb-internal-auth` | `keyfile` | Gemeinsamer Schlüssel für die interne Replica-Set-Anmeldung |
 | `mongo-0-tls`, `mongo-1-tls`, `mongo-2-tls` | `tls.crt`, `tls.key`, `ca.crt` | Zertifikat, privater Schlüssel und CA je Mitglied |
 
-Die Namen und Schlüssel lassen sich über `internalAuth` und `tls.memberSecrets` ändern. Für jedes neue Release ohne gespeicherte Helm-Werte muss das Administratorpasswort aus der lokalen Datei übergeben werden.
+Die Namen und Schlüssel lassen sich über `internalAuth` und `tls.memberSecrets` ändern. Vault-Pfad, Vault-Rolle und ServiceAccount sind über `auth.vaultPath`, `auth.vaultRole` und `auth.serviceAccountName` konfigurierbar.
 
 ### Herkunft der übrigen Secrets
 
@@ -150,6 +155,7 @@ Wenn Vault Secrets Operator eingerichtet ist, liegen Keyfile und TLS-Werte in Va
 
 | Vault-Pfad | Ziel im Kubernetes-Cluster |
 |---|---|
+| `secret/mongodb/auth` | Vault Agent rendert `password` direkt in die Pods |
 | `secret/mongodb/internal-auth` | `mongodb-internal-auth` mit `keyfile` |
 | `secret/mongodb/tls/mongo-0` | `mongo-0-tls` |
 | `secret/mongodb/tls/mongo-1` | `mongo-1-tls` |
@@ -163,24 +169,22 @@ kubectl --context=minikube get vaultstaticsecrets -n mongodb
 
 ### Administratorpasswort ändern
 
-MongoDB muss das neue Passwort für den Benutzer speichern. Nur die lokale Datei oder der Helm-Wert zu ändern aktualisiert das in MongoDB gespeicherte Passwort nicht.
+Ein Vault-Update ändert nicht das in MongoDB gespeicherte Passwort. Ändere den
+Benutzer zuerst in MongoDB über eine authentifizierte Verbindung zur Primary,
+zum Beispiel interaktiv mit
+`db.getSiblingDB("admin").changeUserPassword("admin", passwordPrompt())`.
+Aktualisiere danach das Feld `password` in `secret/mongodb/auth` über Vault UI
+oder einen autorisierten Vault-Client. Starte anschließend das StatefulSet neu,
+damit der Vault Agent das neue Passwort für die Pods rendert:
 
-1. Erzeuge ein neues ASCII-Passwort lokal und halte es aus Git heraus. Unter macOS/Linux zum Beispiel: `openssl rand -hex 32 > certs/admin-password.txt`. Unter Windows PowerShell kannst du stattdessen einen kryptografischen Zufallswert erzeugen:
+```bash
+kubectl rollout restart statefulset/mongodb -n mongodb
+kubectl rollout status statefulset/mongodb -n mongodb --timeout=5m
+```
 
-   ```powershell
-   New-Item -ItemType Directory -Force .\certs | Out-Null
-   $bytes = New-Object byte[] 32
-   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-   $rng.GetBytes($bytes)
-   $password = -join ($bytes | ForEach-Object { $_.ToString('x2') })
-   Set-Content -Path .\certs\admin-password.txt -Value $password -NoNewline -Encoding ascii
-   $rng.Dispose()
-   ```
-2. Verbinde dich mit dem derzeit gültigen Passwort über `mongosh` zur Primary und ändere das MongoDB-Passwort interaktiv mit `db.getSiblingDB("admin").changeUserPassword("admin", passwordPrompt())`. `passwordPrompt()` wartet auf die Eingabe und schreibt das Passwort nicht in den Befehl.
-3. Übergib bei Helm-Upgrades dasselbe Passwort aus der Datei erneut mit `--set-file auth.password=certs/admin-password.txt`. Prüfe anschließend die Anmeldung mit `mongosh --password`, damit die Eingabeaufforderung das Passwort verdeckt.
-4. Lösche die temporäre Passwortdatei nach erfolgreicher Prüfung und entferne das Passwort aus der Zwischenablage.
-
-Unter Windows PowerShell löschst du die Datei mit `Remove-Item .\certs\admin-password.txt` und leerst die Zwischenablage mit `Set-Clipboard -Value ''`.
+Neue Bootstrap-, Backup- und Restore-Pods lesen beim Start den aktuellen
+Vault-Wert. Die Rotation muss geplant werden, damit MongoDB und Vault
+zwischenzeitlich nicht unterschiedliche Passwörter verwenden.
 
 Das lokale Demo-Vault ist im Entwicklungsmodus mit In-Memory-Speicher eingerichtet. Ein Neustart kann die dort gespeicherten Werte löschen. Es ist nicht für produktive Geheimnisverwaltung geeignet. Für produktive Nutzung muss Vault mit dauerhaftem Speicher, geeigneter Authentifizierung, TLS und gesicherter Entsiegelung konfiguriert werden.
 
@@ -332,12 +336,12 @@ Die Topology-Spread-Regel versucht, MongoDB-Pods über Kubernetes-Nodes zu verte
 
 ## HashiCorp Vault
 
-Die optionale Vault-Demo verwendet Vault, Vault Secrets Operator, Kubernetes-Authentifizierung und Vault KV v2. Der Operator synchronisiert Keyfile und TLS-Material aus Vault in Kubernetes-Secrets, die das Helm Chart referenziert. Das MongoDB-Administratorpasswort kommt davon unabhängig aus `certs/admin-password.txt` über `--set-file`; es wird nicht aus Vault oder einem Kubernetes-Secret synchronisiert.
+Die Vault-Integration verwendet Vault KV v2, Vault Agent Injector, Vault Secrets Operator und Kubernetes-Authentifizierung. Der Agent rendert das Admin-Passwort direkt in MongoDB-, Bootstrap-, Backup- und Restore-Pods; dafür wird kein Kubernetes-Secret mit dem Admin-Passwort erstellt. VSO synchronisiert Keyfile und TLS-Material weiterhin in Kubernetes-Secrets.
 
-Die Entwicklungsinstallation und die dazugehörigen Ressourcen befinden sich in `vault/README.md`, `vault/vso-mongodb.yaml` und `vault/mongodb-read.hcl`. Die Shell-Befehle in `vault/README.md` verwenden POSIX-Syntax für macOS/Linux. Unter Windows führe diese Vault-Befehle in WSL oder Git Bash aus; die PowerShell-Beispiele in dieser README decken die normalen Helm-, kubectl-, Backup- und Restore-Schritte ab. Das Dev-Vault nutzt In-Memory-Speicher und einen Demo-Root-Token. Diese Konfiguration dient nur lokalen Tests und darf nicht als produktive Vorlage eingesetzt werden. Eine Secret-Rotation in Vault aktualisiert nicht automatisch das bereits in MongoDB gespeicherte Administratorpasswort; die Datenbank und Vault müssen koordiniert aktualisiert werden.
+Die Einrichtung steht in [`vault/README.md`](vault/README.md); Policy und Ressourcen befinden sich in `vault/mongodb-read.hcl` und `vault/vso-mongodb.yaml`. Vault Agent Injector muss vor dem Erstellen der MongoDB-Pods bereit sein. Das Dev-Vault nutzt In-Memory-Speicher und einen Demo-Root-Token und ist nur für lokale Tests geeignet. Eine Änderung in Vault rotiert nicht automatisch das bereits in MongoDB gespeicherte Passwort; Datenbank, Vault und Pod-Neustart müssen koordiniert werden.
 
 ## Prüfungen und bekannte Grenzen
 
 Im lokalen Minikube-Setup wurden Chart-Rendering und Anpassungen, Replica-Set-Status, Neustart eines Mitglieds, Backup-Erstellung, Aufbewahrung, datenbankspezifischer Restore, vollständiger Restore in einer isolierten Testinstanz sowie die Verteilung auf drei Minikube-Nodes geprüft. Die vollständige Wiederherstellung wurde isoliert getestet, um die aktive Datenbank nicht zu überschreiben.
 
-Die Vault-Demo wurde auf Synchronisierung von Keyfile und TLS-Secrets geprüft. Vault läuft dabei mit flüchtigem Dev-Speicher. Ein produktiver Vault-Betrieb, produktive Schlüsselrotation, externe Backup-Speicherung und ein eigenes automatisches Kapazitätsmanagement sind nicht Teil dieses Charts.
+Die Vault-Demo synchronisiert Keyfile und TLS-Secrets über VSO; Vault Agent liefert das Admin-Passwort zur Laufzeit direkt an Pods. Ein produktiver Vault-Betrieb, produktive Schlüsselrotation, externe Backup-Speicherung und ein eigenes automatisches Kapazitätsmanagement sind nicht Teil dieses Charts.

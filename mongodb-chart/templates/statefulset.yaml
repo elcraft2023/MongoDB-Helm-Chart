@@ -40,11 +40,10 @@ spec:
       labels:
         app.kubernetes.io/name: {{ include "mongodb-chart.fullname" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
-      {{- with .Values.podAnnotations }}
       annotations:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- include "mongodb-chart.vaultAgentAnnotations" (dict "root" . "container" "mongodb" "extra" .Values.podAnnotations) | nindent 8 }}
     spec:
+      serviceAccountName: {{ .Values.auth.serviceAccountName | quote }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -114,11 +113,20 @@ spec:
         - name: mongodb
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          env:
-            - name: MONGO_INITDB_ROOT_USERNAME
-              value: {{ .Values.auth.username | quote }}
-            - name: MONGO_INITDB_ROOT_PASSWORD
-              value: {{ include "mongodb-chart.authPassword" . | quote }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              password_file=/vault/secrets/admin-password
+              if [ ! -s "$password_file" ]; then
+                echo "Vault-Agent hat kein Admin-Passwort bereitgestellt"
+                exit 1
+              fi
+              MONGO_INITDB_ROOT_PASSWORD="$(cat "$password_file")"
+              export MONGO_INITDB_ROOT_USERNAME={{ .Values.auth.username | quote }}
+              export MONGO_INITDB_ROOT_PASSWORD
+              exec /usr/local/bin/docker-entrypoint.sh "$@"
+            - --
           args:
             - --bind_ip_all
             - --port=27017

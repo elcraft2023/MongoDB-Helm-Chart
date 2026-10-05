@@ -7,8 +7,7 @@ Expand the name of the chart.
 
 {{/*
 Create a default fully qualified app name.
-We truncate at 63 chars because some Kubernetes name fields are limited to this (by the DNS naming spec).
-If release name contains chart name it will be used as a full name.
+We truncate at 63 chars because many Kubernetes name fields are limited to 63 chars.
 */}}
 {{- define "mongodb-chart.fullname" -}}
 {{- if .Values.fullnameOverride }}
@@ -59,16 +58,29 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end }}
 
-{{- define "mongodb-chart.authPassword" -}}
-{{- $password := trimSuffix "\r" (trimSuffix "\n" (required "auth.password muss mit --set-file auth.password=certs/admin-password.txt gesetzt werden" .Values.auth.password)) -}}
-{{- if eq $password "" -}}
-{{- fail "auth.password darf nicht leer sein" -}}
-{{- end -}}
-{{- $password -}}
+{{/*
+Configure Vault Agent injection for the admin password without creating a Kubernetes Secret.
+*/}}
+{{- define "mongodb-chart.vaultAgentAnnotations" -}}
+{{- $root := .root -}}
+{{- $path := required "auth.vaultPath muss auf den KV-v2-Admin-Passwortpfad in Vault zeigen" $root.Values.auth.vaultPath -}}
+{{- $role := required "auth.vaultRole muss auf eine Vault-Kubernetes-Auth-Rolle zeigen" $root.Values.auth.vaultRole -}}
+{{- $serviceAccount := required "auth.serviceAccountName muss auf ein für Vault berechtigtes ServiceAccount zeigen" $root.Values.auth.serviceAccountName -}}
+{{- $annotations := mergeOverwrite (deepCopy (.extra | default dict)) (dict
+  "vault.hashicorp.com/agent-inject" "true"
+  "vault.hashicorp.com/role" $role
+  "vault.hashicorp.com/agent-pre-populate-only" "true"
+  "vault.hashicorp.com/agent-inject-containers" .container
+  "vault.hashicorp.com/agent-inject-secret-admin-password" $path
+  "vault.hashicorp.com/agent-inject-file-admin-password" "admin-password"
+  "vault.hashicorp.com/agent-inject-perms-admin-password" "0444"
+  "vault.hashicorp.com/agent-inject-template-admin-password" (printf "{{- with secret \"%s\" -}}\n{{ .Data.data.password }}\n{{- end }}" $path)
+) -}}
+{{- toYaml $annotations -}}
 {{- end }}
 
 {{/*
-Create the name of the service account to use
+Create the name of the service account to use.
 */}}
 {{- define "mongodb-chart.serviceAccountName" -}}
 {{- if .Values.serviceAccount.create }}

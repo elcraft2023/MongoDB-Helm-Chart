@@ -9,22 +9,28 @@ metadata:
 spec:
   backoffLimit: 10
   template:
+    metadata:
+      annotations:
+        {{- include "mongodb-chart.vaultAgentAnnotations" (dict "root" . "container" "initialize-replica-set") | nindent 8 }}
     spec:
       restartPolicy: Never
-      automountServiceAccountToken: false
+      serviceAccountName: {{ .Values.auth.serviceAccountName | quote }}
       containers:
         - name: initialize-replica-set
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          env:
-            - name: MONGO_USERNAME
-              value: {{ .Values.auth.username | quote }}
-            - name: MONGO_PASSWORD
-              value: {{ include "mongodb-chart.authPassword" . | quote }}
           command:
             - sh
-            - -c
+            - -ec
             - |
+              password_file=/vault/secrets/admin-password
+              if [ ! -s "$password_file" ]; then
+                echo "Vault-Agent hat kein Admin-Passwort bereitgestellt"
+                exit 1
+              fi
+              MONGO_USERNAME={{ .Values.auth.username | quote }}
+              MONGO_PASSWORD="$(cat "$password_file")"
+              export MONGO_USERNAME MONGO_PASSWORD
               HOST="{{ include "mongodb-chart.fullname" . }}-0.{{ include "mongodb-chart.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local"
               URI="mongodb://$HOST:27017/admin?directConnection=true"
 
