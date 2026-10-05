@@ -26,15 +26,9 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: MONGO_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: {{ .Values.auth.usernameKey }}
+              value: {{ .Values.auth.username | quote }}
             - name: MONGO_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: {{ .Values.auth.passwordKey }}
+              value: {{ include "mongodb-chart.authPassword" . | quote }}
           command:
             - sh
             - -ec

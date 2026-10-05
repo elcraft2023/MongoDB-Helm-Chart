@@ -116,15 +116,9 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           env:
             - name: MONGO_INITDB_ROOT_USERNAME
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: {{ .Values.auth.usernameKey }}
+              value: {{ .Values.auth.username | quote }}
             - name: MONGO_INITDB_ROOT_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: {{ .Values.auth.passwordKey }}
+              value: {{ include "mongodb-chart.authPassword" . | quote }}
           args:
             - --bind_ip_all
             - --port=27017

@@ -1,6 +1,6 @@
 # HashiCorp Vault integration (demo)
 
-This setup uses Vault KV v2 and the Vault Secrets Operator (VSO). VSO syncs Vault values into Kubernetes Secrets consumed by the existing MongoDB chart. Vault is the source of truth, but the values still exist as Kubernetes Secrets and are readable by Kubernetes identities that have permission to read those Secrets.
+This setup uses Vault KV v2 and the Vault Secrets Operator (VSO). VSO syncs MongoDB's internal keyfile and TLS material into Kubernetes Secrets consumed by the chart. The MongoDB administrator password is separate: Helm loads it from the local `certs/admin-password.txt` file with `--set-file auth.password=certs/admin-password.txt`; VSO does not sync that password.
 
 ## Prerequisites
 
@@ -64,13 +64,12 @@ Populate these KV v2 paths with the listed fields. Import the existing local cre
 
 | Vault path | Fields |
 | --- | --- |
-| `secret/mongodb/auth` | `username`, `password` |
 | `secret/mongodb/internal-auth` | `keyfile` |
 | `secret/mongodb/tls/mongo-0` | `tls.crt`, `tls.key`, `ca.crt` |
 | `secret/mongodb/tls/mongo-1` | `tls.crt`, `tls.key`, `ca.crt` |
 | `secret/mongodb/tls/mongo-2` | `tls.crt`, `tls.key`, `ca.crt` |
 
-The source files belong in the ignored local `certs/` directory. The MongoDB chart continues to reference the destination Kubernetes Secrets by name; it does not place secret values in `values.yaml`.
+The keyfile and certificate source files belong in the ignored local `certs/` directory. The MongoDB chart continues to reference their destination Kubernetes Secrets by name. Create the administrator password file separately; do not add its value to Vault or commit it.
 
 ## Apply and verify
 
@@ -82,12 +81,24 @@ kubectl get vaultstaticsecrets -n mongodb
 kubectl get pods -n mongodb
 ```
 
-Each `VaultStaticSecret` should show `SYNCED`, `HEALTHY`, and `READY` as `True`. The three TLS resources request a StatefulSet rollout when their source values change, so the init containers copy the updated certificates into the pod. If the Helm release or namespace uses different names, update the destination names and `rolloutRestartTargets` accordingly.
+Each `VaultStaticSecret` should show `SYNCED`, `HEALTHY`, and `READY` as `True`. The TLS resources request a StatefulSet rollout when their source values change, so the init containers copy the updated certificates into the pod. If the Helm release or namespace uses different names, update the destination names and `rolloutRestartTargets` accordingly.
+
+For an existing installation that previously synchronized `mongodb-auth`, first upgrade the Helm release with `--set-file auth.password=certs/admin-password.txt` using the password MongoDB currently accepts. Reapply the updated `mongodb-read` policy using the policy command above. Then remove the old password synchronizer; applying this updated manifest does not delete resources that are no longer listed:
+
+```sh
+kubectl delete vaultstaticsecret mongodb-auth-from-vault -n mongodb --ignore-not-found
+```
+
+After confirming no other workload uses the old `mongodb-auth` Secret, remove it as well:
+
+```sh
+kubectl delete secret mongodb-auth -n mongodb --ignore-not-found
+```
 
 ## Rotation notes
 
 - The smoke-test secret used to verify VSO refresh was removed after the rotation test passed.
-- A Vault password update only updates the destination Kubernetes Secret. It does not change the password stored in MongoDB. Coordinate a MongoDB user password change with the Vault update; do not rotate this value by changing Vault alone.
+- The MongoDB administrator password is not managed by this Vault integration. Change it in MongoDB and then pass the new local file to Helm using `--set-file auth.password=certs/admin-password.txt`.
 - TLS updates trigger a StatefulSet rollout through the three TLS `VaultStaticSecret` resources.
 - The replica-set keyfile is shared by all members. Its rotation requires a planned, coordinated MongoDB procedure; this manifest deliberately does not automatically restart the set when that key changes.
 

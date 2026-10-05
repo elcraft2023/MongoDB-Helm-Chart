@@ -28,22 +28,6 @@ spec:
 apiVersion: secrets.hashicorp.com/v1beta1
 kind: VaultStaticSecret
 metadata:
-  name: mongodb-auth-from-vault
-  namespace: mongodb
-spec:
-  vaultAuthRef: mongodb-vault-auth
-  mount: secret
-  type: kv-v2
-  path: mongodb/auth
-  refreshAfter: 60s
-  destination:
-    create: true
-    overwrite: true
-    name: mongodb-auth
----
-apiVersion: secrets.hashicorp.com/v1beta1
-kind: VaultStaticSecret
-metadata:
   name: mongodb-internal-auth-from-vault
   namespace: mongodb
 spec:

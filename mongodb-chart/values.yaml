@@ -48,9 +48,8 @@ resources:
 
 auth:
   enabled: true
-  existingSecret: mongodb-auth
-  usernameKey: username
-  passwordKey: password
+  username: admin
+  password: ""
 
 internalAuth:
   existingSecret: mongodb-internal-auth

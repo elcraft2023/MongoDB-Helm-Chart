@@ -59,6 +59,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end }}
 
+{{- define "mongodb-chart.authPassword" -}}
+{{- $password := trimSuffix "\r" (trimSuffix "\n" (required "auth.password muss mit --set-file auth.password=certs/admin-password.txt gesetzt werden" .Values.auth.password)) -}}
+{{- if eq $password "" -}}
+{{- fail "auth.password darf nicht leer sein" -}}
+{{- end -}}
+{{- $password -}}
+{{- end }}
+
 {{/*
 Create the name of the service account to use
 */}}
